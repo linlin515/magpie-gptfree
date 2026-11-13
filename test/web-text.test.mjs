@@ -7,6 +7,7 @@ import {
   isCodexToken,
   isWebOnlyToken,
   poolFetch,
+  renewAccount,
   verifyWebAccessToken,
 } from "../lib/codex-pool.mjs";
 import {
@@ -93,26 +94,21 @@ test("verifyWebAccessToken admits a Web probe success and rejects 401/403", asyn
   assert.equal(mismatch.reason, "identity_mismatch");
 });
 
-test("discoverPoolModels includes verified Web text models for Platform OAuth accounts", async () => {
+test("discoverPoolModels returns the Web catalog immediately for Platform OAuth accounts", async () => {
   const pTok = platformJwt();
-  const fetcher = async (url) => {
-    assert.equal(String(url), `${CODEX_BASE}/models?client_version=0.118.0`);
-    return new Response(
-      JSON.stringify({
-        models: [
-          { slug: "gpt-6-luna", display_name: "GPT-6 Luna" },
-          { slug: "gpt-5.6-luna", display_name: "GPT-5.6 Luna" },
-        ],
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
-  };
-
+  let probes = 0;
   const models = await discoverPoolModels({
     read: async () => [{ email: "free@example.com", accessToken: pTok }],
-    fetcher,
+    fetcher: async () => {
+      probes++;
+      return new Response("{}", { status: 500 });
+    },
+    reauthenticate: async () => {
+      throw new Error("Web-only discovery must not re-authenticate");
+    },
   });
 
+  assert.equal(probes, 0, "Web-only pool must not spend the 20s budget probing Codex");
   assert.equal(models["gpt-6-luna"].api.npm, "@ai-sdk/openai");
   assert.equal(models["gpt-5.6-luna"].api.npm, "@ai-sdk/openai");
   assert.equal(models["gpt-5.6-terra"].api.npm, "@ai-sdk/openai");
@@ -120,6 +116,51 @@ test("discoverPoolModels includes verified Web text models for Platform OAuth ac
   assert.equal(models["auto"].api.npm, "@ai-sdk/openai");
   assert.equal(models["gpt-image-2.6"].api.npm, "@ai-sdk/openai-compatible");
   assert.equal("gpt-5.6-luna-wm" in models, false);
+});
+
+test("discoverPoolModels probes Codex accounts first, then falls back to Web models", async () => {
+  const codex = codexJwt();
+  const web = platformJwt();
+  let probes = 0;
+  const models = await discoverPoolModels({
+    read: async () => [
+      { email: "codex@example.com", accessToken: codex },
+      { email: "free@example.com", accessToken: web },
+    ],
+    fetcher: async (url) => {
+      probes++;
+      assert.equal(String(url), `${CODEX_BASE}/models?client_version=0.118.0`);
+      return new Response("forbidden", { status: 403 });
+    },
+    reauthenticate: async () => {
+      throw new Error("403 must not trigger re-authentication");
+    },
+  });
+
+  assert.equal(probes, 1);
+  assert.equal(models["gpt-5.6-terra"].api.npm, "@ai-sdk/openai");
+});
+
+test("renewAccount verifies Platform OAuth logins through the Web probe", async () => {
+  const pTok = platformJwt(3600, "web@example.com");
+  const saved = [];
+  const renewed = await renewAccount(
+    { email: "web@example.com", password: "p" },
+    {
+      authenticate: async () => ({ tokens: { access: pTok } }),
+      verify: async () => { throw new Error("Codex verify must not run for Web-only tokens"); },
+      verifyWeb: async (token, opts) => {
+        assert.equal(token, pTok);
+        assert.equal(opts.expectedEmail, "web@example.com");
+        return { accepted: true, status: 200 };
+      },
+      save: async (record) => saved.push(record),
+    },
+  );
+
+  assert.equal(renewed.accessToken, pTok);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].accessToken, pTok);
 });
 
 test("extractWebTextRequest parses instructions, multi-turn items, tool calls, and reasoning", () => {
