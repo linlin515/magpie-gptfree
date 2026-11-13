@@ -1,6 +1,6 @@
 {
   "name": "magpie-gptfree",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "GPT号池：Magpie 多账号批量导入与号池管理插件（支持独立 HTTP 登录与画图）",
   "type": "module",
   "main": "./index.mjs",

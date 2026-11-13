@@ -10,6 +10,16 @@ const jwt = (exp) => [
   Buffer.from(JSON.stringify({ exp })).toString("base64url"), "signature",
 ].join(".");
 
+const platformJwt = (email = "free@example.com", expSeconds = 3600) => [
+  Buffer.from('{"alg":"RS256","typ":"JWT"}').toString("base64url"),
+  Buffer.from(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + expSeconds,
+    client_id: "app_2SKx67EdpoN0G6j64rFvigXD",
+    "https://api.openai.com/profile": { email },
+  })).toString("base64url"),
+  "signature",
+].join(".");
+
 test("dry-run parses three import formats, without contacting upstream", async () => {
   const content = [
     `a@example.com----p1----${seed}`,
@@ -123,6 +133,66 @@ test("DSH Platform token is not falsely marked usable without model verification
   assert.equal(result.failed.length, 1);
   assert.equal(stored.length, 0);
   assert.match(result.failed[0].reason, /Platform Token/);
+});
+
+test("Platform web token is admitted through the web probe with proxy forwarded", async () => {
+  const txt = `a@example.com----pw----${seed}`;
+  const token = platformJwt("a@example.com");
+  const seen = [], stored = [];
+  const result = await runBatch({
+    file: "virtual.txt", read: async () => txt, consent: true,
+    proxy: "http://127.0.0.1:7890",
+    login: async () => ({ tokens: { access: token, id: "", refresh: "r" } }),
+    verifyToken: async () => { throw new Error("Codex probe must not run for web-only tokens"); },
+    verifyWebToken: async (value, opts) => {
+      seen.push({ value, opts });
+      return { accepted: true, status: 200 };
+    },
+    savePool: async (item) => stored.push(item),
+  });
+  assert.equal(result.added, 1);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].accessToken, token);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].value, token);
+  assert.equal(seen[0].opts.proxy, "http://127.0.0.1:7890");
+  assert.equal(seen[0].opts.expectedEmail, "a@example.com");
+});
+
+test("Platform web token rejected by the web probe is not admitted", async () => {
+  const txt = `a@example.com----pw----${seed}`;
+  const stored = [];
+  const result = await runBatch({
+    file: "virtual.txt", read: async () => txt, consent: true,
+    proxy: "http://127.0.0.1:7890",
+    login: async () => ({ tokens: { access: platformJwt("a@example.com"), id: "", refresh: "r" } }),
+    verifyToken: async () => ({ accepted: true }),
+    verifyWebToken: async () => ({ accepted: false, reason: "status_403", status: 403 }),
+    savePool: async (item) => stored.push(item),
+  });
+  assert.equal(result.added, 0);
+  assert.equal(stored.length, 0);
+  assert.equal(result.failed.length, 1);
+  assert.match(result.failed[0].reason, /status_403/);
+});
+
+test("reusable Platform web access token is checked by the web probe", async () => {
+  const token = platformJwt("reuse@example.com");
+  const txt = `reuse@example.com----pw----${seed}----${token}`;
+  let loginCalls = 0, webProbes = 0;
+  const stored = [];
+  const result = await runBatch({
+    file: "virtual.txt", read: async () => txt, consent: true,
+    login: async () => { loginCalls++; return { tokens: { access: "fresh", id: "", refresh: "r" } }; },
+    verifyToken: async () => ({ accepted: false }),
+    verifyWebToken: async () => { webProbes++; return { accepted: true, status: 200 }; },
+    savePool: async (item) => stored.push(item),
+  });
+  assert.equal(result.added, 1);
+  assert.equal(result.reused, 1);
+  assert.equal(loginCalls, 0);
+  assert.equal(webProbes, 1);
+  assert.equal(stored[0].accessToken, token);
 });
 
 test("Codex CLI mode is disabled", async () => {

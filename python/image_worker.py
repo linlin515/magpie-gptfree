@@ -1059,6 +1059,44 @@ class OpenAIWebImageClient:
                     return quota, restore_at, True
         return 0, None, False
 
+    def check_token(self, *, timezone_offset_min: int = -480) -> Dict[str, Any]:
+        """Lightweight Web-side token probe used to admit Platform OAuth tokens."""
+        chk_path = "/backend-api/accounts/check/v4-2023-04-27"
+        try:
+            chk_resp = self.session.get(
+                f"{self.base_url}{chk_path}?timezone_offset_min={int(timezone_offset_min)}",
+                headers=self._headers(chk_path, {"Accept": "application/json"}),
+                timeout=20,
+            )
+        except Exception as exc:
+            raise ImageWorkerError(
+                "accounts_check_network_error",
+                http_status=502,
+                error_code="network_error",
+            ) from exc
+
+        status = int(getattr(chk_resp, "status_code", 0) or 0)
+        if status == 401:
+            return {"ok": False, "http_status": 401, "error_code": "unauthorized", "error": "Access token invalidated"}
+        if status == 403:
+            return {
+                "ok": False,
+                "http_status": 403,
+                "error_code": "forbidden",
+                "error": "Cloudflare / web endpoint denied the request",
+            }
+        self._ensure_ok(chk_resp, "accounts_check")
+        plan_type = ""
+        try:
+            chk_data = chk_resp.json()
+            if isinstance(chk_data, dict):
+                default_acc = ((chk_data.get("accounts") or {}).get("default") or {}).get("account") or {}
+                if isinstance(default_acc, dict):
+                    plan_type = str(default_acc.get("plan_type") or "").strip()
+        except Exception:
+            pass
+        return {"ok": True, "http_status": 200, "plan_type": plan_type or None}
+
     def check_image_quota(self, *, timezone_offset_min: int = -480) -> Dict[str, Any]:
         init_path = "/backend-api/conversation/init"
         init_resp = self.session.post(
@@ -1986,7 +2024,7 @@ def _decode_stdin_images(entries: Any, *, field_name: str = "images") -> list[tu
 
 def handle_payload(data: Any, *, session: Any = None) -> Dict[str, Any]:
     action = data.get("action") if isinstance(data, dict) else None
-    if not isinstance(data, dict) or action not in ("generate_image", "check_image_quota"):
+    if not isinstance(data, dict) or action not in ("generate_image", "check_image_quota", "check_token"):
         return {"ok": False, "http_status": 400, "error_code": "invalid_request", "error": "Invalid worker action"}
 
     access_token = str(data.get("access_token") or "").strip()
@@ -1994,6 +2032,19 @@ def handle_payload(data: Any, *, session: Any = None) -> Dict[str, Any]:
         return {"ok": False, "http_status": 401, "error_code": "unauthorized", "error": "Missing access_token"}
 
     try:
+        if action == "check_token":
+            tz_raw = data.get("timezone_offset_min")
+            try:
+                tz_offset = int(tz_raw) if tz_raw is not None else -480
+            except (TypeError, ValueError):
+                tz_offset = -480
+            with OpenAIWebImageClient(
+                access_token,
+                proxy=str(data.get("proxy") or "").strip(),
+                session=session,
+            ) as client:
+                return client.check_token(timezone_offset_min=tz_offset)
+
         if action == "check_image_quota":
             tz_raw = data.get("timezone_offset_min")
             try:

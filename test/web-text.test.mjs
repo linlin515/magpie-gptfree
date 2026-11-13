@@ -7,6 +7,7 @@ import {
   isCodexToken,
   isWebOnlyToken,
   poolFetch,
+  verifyWebAccessToken,
 } from "../lib/codex-pool.mjs";
 import {
   clearTextCooldowns,
@@ -50,6 +51,46 @@ test("token capability detection separates Platform Web tokens from Codex tokens
   // Opaque/test strings remain compatible with Codex path
   assert.equal(isWebOnlyToken("opaque-token"), false);
   assert.equal(isCodexToken("opaque-token"), true);
+});
+
+test("verifyWebAccessToken admits a Web probe success and rejects 401/403", async () => {
+  const tok = platformJwt(3600, "free@example.com");
+  const seen = [];
+  const ok = await verifyWebAccessToken(tok, {
+    proxy: "http://127.0.0.1:7890",
+    expectedEmail: "free@example.com",
+    runWorker: async (payload) => {
+      seen.push(payload);
+      return { ok: true, http_status: 200, plan_type: "free" };
+    },
+  });
+  assert.equal(ok.accepted, true);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.planType, "free");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].action, "check_token");
+  assert.equal(seen[0].proxy, "http://127.0.0.1:7890");
+
+  const unauthorized = await verifyWebAccessToken(tok, {
+    runWorker: async () => ({ ok: false, http_status: 401, error_code: "unauthorized" }),
+  });
+  assert.equal(unauthorized.accepted, false);
+  assert.equal(unauthorized.reason, "unauthorized");
+  assert.equal(unauthorized.status, 401);
+
+  const forbidden = await verifyWebAccessToken(tok, {
+    runWorker: async () => ({ ok: false, http_status: 403, error_code: "forbidden" }),
+  });
+  assert.equal(forbidden.accepted, false);
+  assert.equal(forbidden.reason, "forbidden");
+  assert.equal(forbidden.status, 403);
+
+  const mismatch = await verifyWebAccessToken(tok, {
+    expectedEmail: "other@example.com",
+    runWorker: async () => ({ ok: true, http_status: 200 }),
+  });
+  assert.equal(mismatch.accepted, false);
+  assert.equal(mismatch.reason, "identity_mismatch");
 });
 
 test("discoverPoolModels includes verified Web text models for Platform OAuth accounts", async () => {

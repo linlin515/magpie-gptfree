@@ -499,5 +499,38 @@ class ImageWorkerUnitTests(unittest.TestCase):
         self.assertEqual(res_429["retry_after"], 95)
 
 
+    def test_check_token_uses_accounts_check_and_maps_statuses(self):
+        def ok_handler(method, url, kwargs):
+            if method == "GET" and url.startswith("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"):
+                return FakeResponse(json_data={
+                    "accounts": {"default": {"account": {"plan_type": "free"}}},
+                })
+            raise AssertionError(f"Unexpected call: {method} {url}")
+
+        res = image_worker.handle_payload(
+            {"action": "check_token", "access_token": "tok-web"},
+            session=FakeSession(ok_handler),
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["http_status"], 200)
+        self.assertEqual(res["plan_type"], "free")
+
+        res_401 = image_worker.handle_payload(
+            {"action": "check_token", "access_token": "tok-bad"},
+            session=FakeSession(lambda m, u, k: FakeResponse(status_code=401, json_data={"detail": "token_invalidated"})),
+        )
+        self.assertFalse(res_401["ok"])
+        self.assertEqual(res_401["http_status"], 401)
+        self.assertEqual(res_401["error_code"], "unauthorized")
+
+        res_403 = image_worker.handle_payload(
+            {"action": "check_token", "access_token": "tok-cf"},
+            session=FakeSession(lambda m, u, k: FakeResponse(status_code=403, text="blocked")),
+        )
+        self.assertFalse(res_403["ok"])
+        self.assertEqual(res_403["http_status"], 403)
+        self.assertEqual(res_403["error_code"], "forbidden")
+
+
 if __name__ == "__main__":
     unittest.main()
